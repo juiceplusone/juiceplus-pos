@@ -2,17 +2,35 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-  <meta name="theme-color" content="#FF6B35"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black"/>
+  <meta name="theme-color" content="#0F172A"/>
   <title>JuicePlus POS</title>
   <link rel="manifest" href="/manifest.json"/>
   <style>
-    *{margin:0;padding:0;box-sizing:border-box;}
-    body{background:#0F172A;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:-apple-system,'SF Pro Display','Helvetica Neue',sans-serif;}
-    #root{width:100%;max-width:430px;height:100vh;}
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0F172A;
+      font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+    }
+    /* prevent pull-to-refresh and bounce */
+    body { overscroll-behavior: none; touch-action: pan-x pan-y; }
+    /* always full viewport */
+    #root { display: flex; flex-direction: column; }
+    /* hide scrollbars globally but keep scroll */
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
   </style>
 </head>
-<body><div id="root"></div></body>
+<body>
+  <div id="root"></div>
+</body>
 </html>
