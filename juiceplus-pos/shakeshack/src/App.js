@@ -132,6 +132,13 @@ const buildCustomerReceipt = (printer, order) => {
   const txLine = `Tax (8.75%)${" ".repeat(Math.max(1,32-10-fmt(order.tax).length))}${fmt(order.tax)}`;
   printer.addText(stLine + "\n");
   printer.addText(txLine + "\n");
+
+  // Surcharge line — only for card payments
+  if (order.paymentMethod === "card" && order.surcharge > 0) {
+    const scLine = `Card fee (3%)${" ".repeat(Math.max(1,32-12-fmt(order.surcharge).length))}${fmt(order.surcharge)}`;
+    printer.addText(scLine + "\n");
+  }
+
   printer.addText("================================\n");
 
   printer.addTextSize(1, 2);
@@ -359,8 +366,22 @@ export default function App() {
   const [clock,        setClock]        = useState(new Date());
   const [printStatus,  setPrintStatus]  = useState(null); // null | "printing" | "ok" | "error"
   const [printerIp,    setPrinterIp]    = useState(PRINTER_CONFIG.ip);
-  const [showSettings, setShowSettings] = useState(false);
-  const [vp,           setVp]           = useState({w:window.innerWidth,h:window.innerHeight});
+  const [showSettings,   setShowSettings]   = useState(false);
+  const [paymentMethod,  setPaymentMethod]  = useState("cash"); // "cash" | "card"
+  const [vp,             setVp]             = useState({w:window.innerWidth,h:window.innerHeight});
+
+  // ── Customer state ──
+  const [showCustModal,  setShowCustModal]  = useState(false);
+  const [custPhone,      setCustPhone]      = useState("");
+  const [custFound,      setCustFound]      = useState(null);
+  const [custSearching,  setCustSearching]  = useState(false);
+  const [activeCustomer, setActiveCustomer] = useState(null);
+  const [customers,      setCustomers]      = useState([]);
+  const [custSearch,     setCustSearch]     = useState("");
+  const [editCust,       setEditCust]       = useState(null);
+  const [custLoading,    setCustLoading]    = useState(false);
+
+  const SURCHARGE_RATE = 0.03; // 3% card surcharge
 
   useEffect(()=>{const fn=()=>setVp({w:window.innerWidth,h:window.innerHeight});window.addEventListener("resize",fn);return()=>window.removeEventListener("resize",fn);},[]);
   useEffect(()=>{const t=setInterval(()=>setClock(new Date()),1000);return()=>clearInterval(t);},[]);
@@ -370,7 +391,7 @@ export default function App() {
     window.addEventListener("online",on);window.addEventListener("offline",off);
     return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off);};
   },[]);
-  useEffect(()=>{loadData();},[]);
+  useEffect(()=>{loadData();loadCustomers();},[]);
 
   const loadData = async()=>{
     setLoading(true);
@@ -387,6 +408,83 @@ export default function App() {
   };
   const flushQueue=async()=>{while(offlineQueue.length)await pushSupabase(offlineQueue.shift());};
 
+  /* ── Customer DB functions — via Edge Function (AES-256-GCM encrypted) ── */
+  const VAULT_URL = `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/customer-vault`;
+  const VAULT_HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${process.env.REACT_APP_SUPABASE_ANON_KEY}`,
+  };
+
+  const vaultCall = async (body) => {
+    const res = await fetch(VAULT_URL, {
+      method: "POST",
+      headers: VAULT_HEADERS,
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Vault error: ${res.status}`);
+    return res.json();
+  };
+
+  const loadCustomers = async () => {
+    setCustLoading(true);
+    try {
+      const { customers: data } = await vaultCall({ action: "list" });
+      if (data) setCustomers(data);
+    } catch(e) { console.error(e); }
+    setCustLoading(false);
+  };
+
+  const lookupByPhone = async (phone) => {
+    const clean = phone.replace(/\D/g, "");
+    if (clean.length < 7) return;
+    setCustSearching(true);
+    try {
+      const { customer } = await vaultCall({ action: "lookup", phone: clean });
+      setCustFound(customer || null);
+    } catch(e) { setCustFound(null); }
+    setCustSearching(false);
+  };
+
+  const saveCustomer = async (cust) => {
+    try {
+      const { customer } = await vaultCall({
+        action: "upsert",
+        id:        cust.id || undefined,
+        phone:     cust.phone,
+        name:      cust.name,
+        email:     cust.email,
+        allergies: cust.allergies,
+        favorites: cust.favorites || [],
+      });
+      if (customer) {
+        setCustomers(prev => cust.id
+          ? prev.map(c => c.id === cust.id ? customer : c)
+          : [customer, ...prev]
+        );
+      }
+      return customer;
+    } catch(e) { console.error(e); return null; }
+  };
+
+  const updateCustomerStats = async (customerId, orderTotal, orderItems) => {
+    try {
+      await vaultCall({ action: "updateStats", id: customerId, orderTotal, orderItems });
+    } catch(e) { console.error(e); }
+  };
+
+  const attachCustomer = (cust) => {
+    setActiveCustomer(cust);
+    setShowCustModal(false);
+    setCustPhone("");
+    setCustFound(null);
+    toast$(`👤 ${cust.name} attached to order`, "ok");
+  };
+
+  const detachCustomer = () => {
+    setActiveCustomer(null);
+    toast$("Customer removed from order", "ok");
+  };
+
   const toast$=(msg,type="ok")=>{setToast({msg,type});setTimeout(()=>setToast(null),2500);};
 
   /* ── Cart ── */
@@ -401,10 +499,12 @@ export default function App() {
   };
   const updateQty=(key,d)=>setCart(prev=>prev.map(c=>c.key===key?{...c,qty:Math.max(0,c.qty+d)}:c).filter(c=>c.qty>0));
 
-  const subtotal=cart.reduce((s,c)=>s+c.price*c.qty,0);
-  const tax=subtotal*0.0875;
-  const total=subtotal+tax;
-  const cartCount=cart.reduce((s,c)=>s+c.qty,0);
+  const subtotal   = cart.reduce((s,c)=>s+c.price*c.qty, 0);
+  const tax        = subtotal * 0.0875;
+  const preTax     = subtotal + tax;
+  const surcharge  = paymentMethod === "card" ? preTax * SURCHARGE_RATE : 0;
+  const total      = preTax + surcharge;
+  const cartCount  = cart.reduce((s,c)=>s+c.qty, 0);
 
   /* ── Place order + auto print ── */
   const placeOrder=async()=>{
@@ -412,7 +512,9 @@ export default function App() {
     setSaving(true);
     const order={
       id:`ORD-${orderNum}`,num:orderNum,items:[...cart],
-      subtotal,tax,total,time:new Date().toISOString(),dateLabel:todayStr(),
+      subtotal,tax,surcharge,total,
+      paymentMethod,
+      time:new Date().toISOString(),dateLabel:todayStr(),
     };
     // Save to Supabase
     if(online)await pushSupabase(order);
@@ -421,6 +523,12 @@ export default function App() {
     setOrderNum(n=>n+1);
     setLastOrder(order);
     setCart([]);
+    setPaymentMethod("cash"); // reset to cash for next order
+    // Update customer stats if one is attached
+    if (activeCustomer) {
+      await updateCustomerStats(activeCustomer.id, total, cart);
+      setActiveCustomer(null);
+    }
     setSaving(false);
     setScreen("receipt");
     // Auto print
@@ -512,9 +620,9 @@ export default function App() {
             style={{background:C.card,border:"none",borderRadius:9,padding:"6px 12px",color:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
             ⚙️ Printer
           </button>
-          {["pos","history","reports"].map(s=>(
+          {["pos","history","reports","customers"].map(s=>(
             <NavBtn key={s} id={s} active={screen===s} onClick={()=>setScreen(s)}
-              label={s==="pos"?"🧾 POS":s==="history"?"📜 History":"📊 Reports"}/>
+              label={s==="pos"?"🧾 POS":s==="history"?"📜 History":s==="reports"?"📊 Reports":"👥 Customers"}/>
           ))}
         </div>
       </div>
@@ -590,15 +698,50 @@ export default function App() {
                 })}
               </div>
               <div style={{padding:"10px 12px 14px",borderTop:`1px solid ${C.border}`,background:C.bg,flexShrink:0}}>
+
+                {/* ── Customer strip ── */}
+                {activeCustomer ? (
+                  <div style={{background:"#0F2A1A",border:`1px solid #22C55E44`,borderRadius:10,padding:"8px 10px",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:800,color:C.green}}>👤 {activeCustomer.name}</div>
+                      <div style={{fontSize:10,color:C.muted,marginTop:1}}>{activeCustomer.phone} · {activeCustomer.visit_count||0} visits · {fmt(activeCustomer.total_spend||0)} spent</div>
+                      {activeCustomer.allergies&&<div style={{fontSize:10,color:C.yellow,marginTop:1}}>⚠️ {activeCustomer.allergies}</div>}
+                    </div>
+                    <button onClick={detachCustomer} style={{background:"none",border:"none",color:C.muted,fontSize:16,cursor:"pointer"}}>✕</button>
+                  </div>
+                ) : (
+                  <button onClick={()=>setShowCustModal(true)}
+                    style={{width:"100%",background:C.surface,border:`1px dashed ${C.border}`,borderRadius:10,padding:"7px",color:C.muted,fontWeight:600,fontSize:12,cursor:"pointer",marginBottom:10}}>
+                    👤 Attach Customer (optional)
+                  </button>
+                )}
+
+                {/* ── Cash / Card toggle ── */}
+                <div style={{display:"flex",gap:6,marginBottom:10}}>
+                  {["cash","card"].map(m=>{
+                    const active=paymentMethod===m;
+                    const col=m==="cash"?C.green:"#60A5FA";
+                    return(
+                      <button key={m} onClick={()=>setPaymentMethod(m)}
+                        style={{flex:1,background:active?col+"22":C.surface,border:`2px solid ${active?col:C.border}`,borderRadius:10,padding:"8px",color:active?col:C.muted,fontWeight:800,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                        {m==="cash"?"💵 Cash":"💳 Card"}
+                      </button>
+                    );
+                  })}
+                </div>
+
                 <Row label="Subtotal"   val={fmt(subtotal)}/>
                 <Row label="Tax 8.75%"  val={fmt(tax)} mt={4}/>
+                {paymentMethod==="card"&&(
+                  <Row label="Card fee 3%" val={fmt(surcharge)} mt={4}/>
+                )}
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:20,fontWeight:900,margin:"10px 0 12px",paddingTop:8,borderTop:`1px solid ${C.border}`}}>
                   <span style={{color:C.text}}>TOTAL</span>
                   <span style={{color:C.accent,fontVariantNumeric:"tabular-nums"}}>{fmt(total)}</span>
                 </div>
                 <button onClick={placeOrder} disabled={!cart.length||saving}
-                  style={{width:"100%",background:!cart.length?C.surface:saving?C.dim:`linear-gradient(135deg,${C.accent},${C.yellow})`,border:"none",borderRadius:12,padding:"14px",color:!cart.length?C.dim:C.text,fontWeight:900,fontSize:18,cursor:!cart.length?"not-allowed":"pointer",boxShadow:cart.length?`0 4px 20px ${C.accent}44`:"none"}}>
-                  {saving?"💾 Saving…":!cart.length?"Add Items →":`✓ CHARGE ${fmt(total)}`}
+                  style={{width:"100%",background:!cart.length?C.surface:saving?C.dim:paymentMethod==="card"?`linear-gradient(135deg,#3B82F6,#6366F1)`:`linear-gradient(135deg,${C.accent},${C.yellow})`,border:"none",borderRadius:12,padding:"14px",color:!cart.length?C.dim:C.text,fontWeight:900,fontSize:18,cursor:!cart.length?"not-allowed":"pointer",boxShadow:cart.length?`0 4px 20px ${paymentMethod==="card"?"#3B82F644":C.accent+"44"}`:"none"}}>
+                  {saving?"💾 Saving…":!cart.length?"Add Items →":paymentMethod==="card"?`💳 CHARGE ${fmt(total)}`:`💵 CASH ${fmt(total)}`}
                 </button>
                 {!online&&cart.length>0&&<div style={{textAlign:"center",marginTop:6,fontSize:10,color:C.yellow}}>⚠️ Offline mode</div>}
               </div>
@@ -613,7 +756,12 @@ export default function App() {
               <div style={{textAlign:"center",marginBottom:20}}>
                 <div style={{width:68,height:68,borderRadius:"50%",background:"linear-gradient(135deg,#22C55E,#16A34A)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:32,margin:"0 auto 10px",boxShadow:"0 0 28px rgba(34,197,94,0.4)"}}>✓</div>
                 <div style={{fontSize:22,fontWeight:900,color:C.text}}>Order Complete!</div>
-                <div style={{fontSize:12,color:C.muted,marginTop:4}}>{lastOrder.id} · {online?"Saved ☁️":"Queued for sync"}</div>
+                <div style={{fontSize:12,color:C.muted,marginTop:4,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+                  <span>{lastOrder.id} · {online?"Saved ☁️":"Queued for sync"}</span>
+                  <span style={{background:lastOrder.paymentMethod==="card"?"#1E3A5F":"#064E3B",color:lastOrder.paymentMethod==="card"?"#60A5FA":C.green,borderRadius:6,padding:"2px 8px",fontWeight:700,fontSize:11}}>
+                    {lastOrder.paymentMethod==="card"?"💳 Card":"💵 Cash"}
+                  </span>
+                </div>
               </div>
 
               {/* Print status */}
@@ -655,6 +803,9 @@ export default function App() {
                 <div style={{borderTop:`1px dashed ${C.border}`,paddingTop:10,marginTop:6}}>
                   <Row label="Subtotal"  val={fmt(lastOrder.subtotal)}/>
                   <Row label="Tax"       val={fmt(lastOrder.tax)} mt={4}/>
+                  {lastOrder.paymentMethod==="card"&&lastOrder.surcharge>0&&(
+                    <Row label="Card fee 3%" val={fmt(lastOrder.surcharge)} mt={4}/>
+                  )}
                   <div style={{display:"flex",justifyContent:"space-between",fontSize:20,fontWeight:900,color:C.accent,marginTop:10}}><span>TOTAL</span><span>{fmt(lastOrder.total)}</span></div>
                 </div>
               </div>
@@ -821,7 +972,142 @@ export default function App() {
             </div>
           </div>
         )}
+        {/* ── CUSTOMERS SCREEN ── */}
+        {screen==="customers"&&(
+          <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:10,flexShrink:0,flexWrap:"wrap"}}>
+              <SearchBox value={custSearch} onChange={setCustSearch}/>
+              <button onClick={()=>setEditCust({phone:"",name:"",email:"",allergies:"",favorites:[]})}
+                style={{background:C.accent,border:"none",borderRadius:9,padding:"7px 14px",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                + New Customer
+              </button>
+              <button onClick={loadCustomers} style={{background:C.card,border:"none",borderRadius:9,padding:"7px 12px",color:C.muted,fontSize:13,cursor:"pointer",fontWeight:600}}>↻</button>
+              <div style={{marginLeft:"auto",fontSize:12,color:C.muted}}>{customers.length} customers</div>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:16}}>
+              {custLoading?<div style={{textAlign:"center",paddingTop:60,color:C.muted}}>Loading…</div>
+              :customers.filter(c=>!custSearch||(c.name||"").toLowerCase().includes(custSearch.toLowerCase())||(c.phone||"").includes(custSearch)||(c.email||"").toLowerCase().includes(custSearch.toLowerCase())).length===0
+                ?<Empty icon="👥" msg="No customers yet"/>
+                :customers.filter(c=>!custSearch||(c.name||"").toLowerCase().includes(custSearch.toLowerCase())||(c.phone||"").includes(custSearch)||(c.email||"").toLowerCase().includes(custSearch.toLowerCase())).map(c=>(
+                <div key={c.id} style={{background:C.card,borderRadius:14,padding:"14px 16px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"flex-start",borderLeft:`3px solid ${C.green}`}}>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4}}>
+                      <div style={{fontSize:15,fontWeight:900,color:C.text}}>{c.name||"Unknown"}</div>
+                      <div style={{background:"#064E3B",borderRadius:6,padding:"2px 8px",fontSize:10,color:C.green,fontWeight:700}}>{c.visit_count||0} visits</div>
+                      <div style={{background:"#1A2235",borderRadius:6,padding:"2px 8px",fontSize:10,color:C.yellow,fontWeight:700}}>{fmt(c.total_spend||0)}</div>
+                    </div>
+                    <div style={{fontSize:11,color:C.muted}}>{c.phone}{c.email?` · ${c.email}`:""}</div>
+                    {c.allergies&&<div style={{fontSize:11,color:C.yellow,marginTop:4}}>⚠️ {c.allergies}</div>}
+                    {c.favorites?.length>0&&<div style={{fontSize:10,color:C.muted,marginTop:4}}>❤️ {c.favorites.slice(0,3).map(f=>f.name).join(", ")}</div>}
+                    {c.last_visit&&<div style={{fontSize:10,color:C.dim,marginTop:3}}>Last visit: {dateStr(c.last_visit)}</div>}
+                  </div>
+                  <button onClick={()=>setEditCust(c)}
+                    style={{background:C.surface,border:"none",borderRadius:8,padding:"5px 10px",color:C.muted,fontSize:11,fontWeight:600,cursor:"pointer",flexShrink:0}}>
+                    Edit
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* ══ CUSTOMER LOOKUP MODAL (at checkout) ══ */}
+      {showCustModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:150,backdropFilter:"blur(5px)"}}
+          onClick={()=>{setShowCustModal(false);setCustPhone("");setCustFound(null);}}>
+          <div style={{background:C.card,borderRadius:20,padding:24,width:"94%",maxWidth:420,border:`1px solid ${C.border}`}}
+            onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:16,fontWeight:900,color:C.text,marginBottom:4}}>👤 Customer Lookup</div>
+            <div style={{fontSize:11,color:C.muted,marginBottom:16}}>Enter phone number to find or create customer</div>
+
+            {/* Phone input */}
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              <input value={custPhone} onChange={e=>{setCustPhone(e.target.value);setCustFound(null);}}
+                onKeyDown={e=>e.key==="Enter"&&lookupByPhone(custPhone)}
+                placeholder="Phone number…" maxLength={15}
+                style={{flex:1,background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:15,outline:"none"}}/>
+              <button onClick={()=>lookupByPhone(custPhone)} disabled={custSearching||custPhone.replace(/\D/g,"").length<7}
+                style={{background:C.accent,border:"none",borderRadius:10,padding:"10px 16px",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>
+                {custSearching?"…":"Search"}
+              </button>
+            </div>
+
+            {/* Found customer */}
+            {custFound&&(
+              <div style={{background:"#0F2A1A",borderRadius:12,padding:"12px 14px",marginBottom:14,border:`1px solid ${C.green}44`}}>
+                <div style={{fontSize:14,fontWeight:800,color:C.green,marginBottom:4}}>✓ Customer Found</div>
+                <div style={{fontSize:14,fontWeight:700,color:C.text}}>{custFound.name}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>{custFound.phone}{custFound.email?` · ${custFound.email}`:""}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:2}}>{custFound.visit_count||0} visits · {fmt(custFound.total_spend||0)} spent</div>
+                {custFound.allergies&&<div style={{fontSize:11,color:C.yellow,marginTop:6,fontWeight:700}}>⚠️ ALLERGY: {custFound.allergies}</div>}
+                {custFound.favorites?.length>0&&<div style={{fontSize:10,color:C.muted,marginTop:4}}>❤️ Favorites: {custFound.favorites.slice(0,3).map(f=>f.name).join(", ")}</div>}
+                <button onClick={()=>attachCustomer(custFound)}
+                  style={{width:"100%",marginTop:12,background:C.green,border:"none",borderRadius:10,padding:"10px",color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+                  ✓ Attach to Order
+                </button>
+              </div>
+            )}
+
+            {/* Not found — offer to create */}
+            {custPhone.replace(/\D/g,"").length>=7&&custFound===null&&!custSearching&&(
+              <div style={{background:C.bg,borderRadius:12,padding:"12px 14px",marginBottom:14,border:`1px dashed ${C.border}`}}>
+                <div style={{fontSize:12,color:C.muted,marginBottom:8}}>No customer found for this number.</div>
+                <button onClick={()=>{setShowCustModal(false);setEditCust({phone:custPhone,name:"",email:"",allergies:"",favorites:[]});}}
+                  style={{width:"100%",background:C.accent,border:"none",borderRadius:10,padding:"10px",color:"#fff",fontWeight:800,fontSize:13,cursor:"pointer"}}>
+                  + Create New Customer
+                </button>
+              </div>
+            )}
+
+            <button onClick={()=>{setShowCustModal(false);setCustPhone("");setCustFound(null);}}
+              style={{width:"100%",background:C.surface,border:"none",borderRadius:10,padding:"10px",color:C.muted,fontWeight:700,fontSize:13,cursor:"pointer"}}>
+              Skip
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ══ CUSTOMER EDIT / CREATE MODAL ══ */}
+      {editCust&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:150,backdropFilter:"blur(5px)"}}
+          onClick={()=>setEditCust(null)}>
+          <div style={{background:C.card,borderRadius:20,padding:24,width:"94%",maxWidth:440,border:`1px solid ${C.border}`,maxHeight:"90vh",overflowY:"auto"}}
+            onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:16,fontWeight:900,color:C.text,marginBottom:16}}>{editCust.id?"✏️ Edit Customer":"➕ New Customer"}</div>
+            {[
+              {label:"Phone *",    key:"phone",    placeholder:"e.g. 6105551234",   type:"tel"},
+              {label:"Name",       key:"name",     placeholder:"Customer name",      type:"text"},
+              {label:"Email",      key:"email",    placeholder:"email@example.com",  type:"email"},
+              {label:"Allergies / Dietary Notes", key:"allergies", placeholder:"e.g. Dairy free, nut allergy", type:"text"},
+            ].map(f=>(
+              <div key={f.key} style={{marginBottom:12}}>
+                <div style={{fontSize:10,fontWeight:700,color:C.muted,marginBottom:5}}>{f.label}</div>
+                <input value={editCust[f.key]||""} onChange={e=>setEditCust(prev=>({...prev,[f.key]:e.target.value}))}
+                  placeholder={f.placeholder} type={f.type}
+                  style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+              </div>
+            ))}
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <button onClick={()=>setEditCust(null)}
+                style={{flex:1,background:C.bg,border:"none",borderRadius:11,padding:"12px",color:C.muted,fontWeight:700,fontSize:13,cursor:"pointer"}}>Cancel</button>
+              <button onClick={async()=>{
+                  const saved=await saveCustomer(editCust);
+                  if(saved){
+                    toast$(`✅ ${saved.name||"Customer"} saved`);
+                    // If we came from checkout lookup, attach immediately
+                    if(showCustModal||!screen==="customers") attachCustomer(saved);
+                    setEditCust(null);
+                  }
+                }}
+                disabled={!editCust.phone}
+                style={{flex:2,background:C.accent,border:"none",borderRadius:11,padding:"12px",color:"#fff",fontWeight:900,fontSize:14,cursor:"pointer"}}>
+                {editCust.id?"Save Changes":"Create Customer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══ BOOSTER MODAL ══ */}
       {modal&&(
