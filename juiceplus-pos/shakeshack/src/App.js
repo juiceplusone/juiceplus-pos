@@ -164,11 +164,9 @@ const buildKitchenTicket = (printer, order) => {
   /*
     CUP LABEL MODE — prints one compact label per cup (per qty)
     Optimized for 58mm × 40mm waterproof thermal labels on round cold drink cups.
-    Each label fits: order # + time + item name + boosters + special note.
-    Multiple quantities = multiple labels, one per physical cup.
+    Each label: order # + time + item name + INGREDIENTS + boosters + special note.
   */
 
-  // Expand items by qty so each cup gets its own label
   const cups = [];
   order.items.forEach(c => {
     for (let i = 0; i < c.qty; i++) {
@@ -201,11 +199,26 @@ const buildKitchenTicket = (printer, order) => {
     printer.addTextSize(1, 1);
     printer.addTextStyle(false, false, false, printer.COLOR_1);
 
-    // ── BOOSTERS — bold, compact ──
+    // ── INGREDIENTS — each on its own line ──
+    if (c.item.ing) {
+      printer.addText("--------------------------------\n");
+      printer.addTextAlign(printer.ALIGN_LEFT);
+      printer.addTextStyle(false, false, true, printer.COLOR_1);
+      printer.addText("INGREDIENTS:\n");
+      printer.addTextStyle(false, false, false, printer.COLOR_1);
+      // Split by comma and print each ingredient on its own line
+      const ings = c.item.ing.split(",").map(s => s.trim()).filter(Boolean);
+      ings.forEach(ing => {
+        printer.addText(`  • ${ing}\n`);
+      });
+    }
+
+    // ── BOOSTERS — bold ──
     if (c.boosters?.length > 0) {
+      printer.addText("--------------------------------\n");
       printer.addTextAlign(printer.ALIGN_CENTER);
       printer.addTextStyle(false, false, true, printer.COLOR_1);
-      printer.addText(`+ ${c.boosters.map(b => b.name).join(" · ")}\n`);
+      printer.addText(`+ ${c.boosters.map(b => b.name).join("  +  ")}\n`);
       printer.addTextStyle(false, false, false, printer.COLOR_1);
     }
 
@@ -223,8 +236,7 @@ const buildKitchenTicket = (printer, order) => {
     printer.addCut(printer.CUT_FEED);
   });
 
-  // ── SEPARATOR STRIP — printed after all cups in this order ──
-  // Staff tear here to separate one order's labels from the next
+  // ── SEPARATOR STRIP ──
   printer.addTextLang("en");
   printer.addTextAlign(printer.ALIGN_CENTER);
   printer.addTextSize(1, 1);
@@ -359,6 +371,7 @@ const browserPrintKitchen = (order) => {
 
   const cupBlocks = cups.map((c, idx) => {
     const cupTag = totalCups > 1 ? ` (${idx+1}/${totalCups})` : "";
+    const ings = (c.item.ing || "").split(",").map(s => s.trim()).filter(Boolean);
     return `
       <div class="label">
         <div class="label-header">
@@ -367,8 +380,15 @@ const browserPrintKitchen = (order) => {
         </div>
         <div class="divider"></div>
         <div class="item-name">${c.item.name}</div>
+        ${ings.length ? `
+          <div class="divider"></div>
+          <div class="ing-title">INGREDIENTS</div>
+          <div class="ing-list">
+            ${ings.map(i => `<div class="ing-row">• ${i}</div>`).join("")}
+          </div>
+        ` : ""}
         ${c.boosters?.length
-          ? `<div class="boosters">+ ${c.boosters.map(b=>b.name).join(" · ")}</div>`
+          ? `<div class="divider"></div><div class="boosters">+ ${c.boosters.map(b=>b.name).join(" · ")}</div>`
           : ""}
         ${c.note
           ? `<div class="note">!! ${c.note} !!</div>`
@@ -434,6 +454,20 @@ const browserPrintKitchen = (order) => {
         font-weight: bold;
         text-align: center;
         margin-bottom: 4px;
+      }
+      .ing-title {
+        font-size: 10px;
+        font-weight: bold;
+        letter-spacing: 1px;
+        color: #555;
+        margin-bottom: 3px;
+      }
+      .ing-list {
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      .ing-row {
+        padding-left: 4px;
       }
       .note {
         font-size: 14px;
