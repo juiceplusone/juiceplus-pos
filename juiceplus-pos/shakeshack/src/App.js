@@ -330,15 +330,160 @@ const browserPrint = (order) => {
       ${order.items.map(c => `
         <div class="row"><span>${c.qty}x ${c.item.name}</span><span>${fmt(c.price*c.qty)}</span></div>
         ${c.boosters?.length ? `<div style="padding-left:10px;color:#555">+ ${c.boosters.map(b=>b.name).join(", ")}</div>` : ""}
+        ${c.note ? `<div style="padding-left:10px;color:#c00">* ${c.note}</div>` : ""}
       `).join("")}
       <div class="line"></div>
       <div class="row"><span>Subtotal</span><span>${fmt(order.subtotal)}</span></div>
       <div class="row"><span>Tax (8.75%)</span><span>${fmt(order.tax)}</span></div>
+      ${order.surcharge>0?`<div class="row"><span>Card fee 3%</span><span>${fmt(order.surcharge)}</span></div>`:""}
       <div class="line"></div>
       <div class="row total"><span>TOTAL</span><span>${fmt(order.total)}</span></div>
       <div class="line"></div>
       <div class="center" style="margin-top:10px">Thank you!</div>
       <div class="center">Enjoy your juice :)</div>
+    </body></html>
+  `);
+  win.document.close();
+};
+
+/* ─── BROWSER KITCHEN TICKET PREVIEW ───────────────────── */
+const browserPrintKitchen = (order) => {
+  // Expand items by qty — one label block per physical cup
+  const cups = [];
+  order.items.forEach(c => {
+    for (let i = 0; i < c.qty; i++) {
+      cups.push({ ...c, cupNum: i + 1, totalCups: c.qty });
+    }
+  });
+  const totalCups = cups.length;
+
+  const cupBlocks = cups.map((c, idx) => {
+    const cupTag = totalCups > 1 ? ` (${idx+1}/${totalCups})` : "";
+    return `
+      <div class="label">
+        <div class="label-header">
+          <span class="order-id">${order.id}${cupTag}</span>
+          <span class="time">${timeStr(order.time)}</span>
+        </div>
+        <div class="divider"></div>
+        <div class="item-name">${c.item.name}</div>
+        ${c.boosters?.length
+          ? `<div class="boosters">+ ${c.boosters.map(b=>b.name).join(" · ")}</div>`
+          : ""}
+        ${c.note
+          ? `<div class="note">!! ${c.note} !!</div>`
+          : ""}
+        <div class="spacer"></div>
+      </div>
+    `;
+  }).join(`<div class="cut">✂ ─────────────────────── ✂</div>`);
+
+  const separator = `
+    <div class="cut">✂ ─────────────────────── ✂</div>
+    <div class="separator">
+      <div class="sep-title">ORDER COMPLETE</div>
+      <div class="sep-sub">${order.id} · ${totalCups} cup${totalCups!==1?"s":""}</div>
+    </div>
+    <div class="cut">✂ ─────────────────────── ✂</div>
+  `;
+
+  const win = window.open("", "_blank", "width=320,height=700");
+  win.document.write(`
+    <html><head><title>Kitchen Ticket — ${order.id}</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: monospace;
+        background: #f5f5f5;
+        padding: 16px;
+      }
+      h2 {
+        font-size: 13px;
+        color: #666;
+        margin-bottom: 12px;
+        text-align: center;
+        letter-spacing: 1px;
+      }
+      .label {
+        background: white;
+        border: 2px solid #000;
+        border-radius: 4px;
+        padding: 10px 12px;
+        width: 220px;
+        margin: 0 auto;
+      }
+      .label-header {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        font-weight: bold;
+        margin-bottom: 6px;
+      }
+      .order-id { color: #000; }
+      .time     { color: #555; }
+      .divider  { border-top: 1px solid #000; margin: 6px 0; }
+      .item-name {
+        font-size: 22px;
+        font-weight: 900;
+        text-align: center;
+        margin: 8px 0;
+        line-height: 1.1;
+      }
+      .boosters {
+        font-size: 12px;
+        font-weight: bold;
+        text-align: center;
+        margin-bottom: 4px;
+      }
+      .note {
+        font-size: 14px;
+        font-weight: 900;
+        text-align: center;
+        border: 2px solid #000;
+        padding: 4px;
+        margin-top: 6px;
+        background: #000;
+        color: #fff;
+      }
+      .spacer { height: 8px; }
+      .cut {
+        text-align: center;
+        font-size: 11px;
+        color: #999;
+        margin: 6px 0;
+        letter-spacing: 1px;
+      }
+      .separator {
+        width: 220px;
+        margin: 0 auto;
+        border: 1px dashed #000;
+        padding: 8px;
+        text-align: center;
+      }
+      .sep-title {
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 2px;
+      }
+      .sep-sub {
+        font-size: 11px;
+        color: #555;
+        margin-top: 3px;
+      }
+      @media print {
+        body { background: white; padding: 0; }
+        h2 { display: none; }
+      }
+    </style>
+    </head>
+    <body>
+      <h2>🍽 KITCHEN TICKET PREVIEW — ${order.id}</h2>
+      ${cupBlocks}
+      ${separator}
+      <div style="text-align:center;margin-top:16px">
+        <button onclick="window.print()" style="padding:8px 20px;font-size:13px;cursor:pointer">🖨️ Print</button>
+        <button onclick="window.close()" style="padding:8px 20px;font-size:13px;cursor:pointer;margin-left:8px">Close</button>
+      </div>
     </body></html>
   `);
   win.document.close();
@@ -811,8 +956,12 @@ export default function App() {
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>browserPrint(lastOrder)}
-                  style={{flex:1,background:C.card,border:"none",borderRadius:12,padding:"12px",color:C.muted,fontWeight:700,fontSize:13,cursor:"pointer"}}>
-                  🖨️ Browser Print
+                  style={{flex:1,background:C.card,border:"none",borderRadius:12,padding:"12px",color:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  🧾 Receipt Preview
+                </button>
+                <button onClick={()=>browserPrintKitchen(lastOrder)}
+                  style={{flex:1,background:C.card,border:"none",borderRadius:12,padding:"12px",color:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                  🍽️ Kitchen Preview
                 </button>
                 <button onClick={()=>setScreen("pos")}
                   style={{flex:2,background:`linear-gradient(135deg,${C.accent},${C.yellow})`,border:"none",borderRadius:12,padding:"12px",color:C.text,fontWeight:900,fontSize:16,cursor:"pointer",boxShadow:`0 4px 20px ${C.accent}44`}}>
@@ -883,6 +1032,10 @@ export default function App() {
                   <button onClick={()=>reprintOrder(detailOrder)}
                     style={{background:`linear-gradient(135deg,${C.accent},${C.yellow})`,border:"none",borderRadius:9,padding:"7px 14px",color:C.text,fontWeight:700,cursor:"pointer",fontSize:13}}>
                     🖨️ Print Receipt
+                  </button>
+                  <button onClick={()=>browserPrintKitchen(detailOrder)}
+                    style={{background:C.card,border:"none",borderRadius:9,padding:"7px 14px",color:C.muted,fontWeight:700,cursor:"pointer",fontSize:13}}>
+                    🍽️ Kitchen
                   </button>
                   <button onClick={()=>setScreen("history")}
                     style={{background:C.bg,border:"none",borderRadius:8,padding:"7px 14px",color:C.muted,fontWeight:700,cursor:"pointer",fontSize:13}}>← Back</button>
