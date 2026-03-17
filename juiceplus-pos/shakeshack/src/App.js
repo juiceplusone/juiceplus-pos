@@ -587,27 +587,15 @@ export default function App() {
   };
   const flushQueue=async()=>{while(offlineQueue.length)await pushSupabase(offlineQueue.shift());};
 
-  /* ── Customer DB functions — via Edge Function (AES-256-GCM encrypted) ── */
-  const VAULT_URL = `${process.env.REACT_APP_SUPABASE_URL}/functions/v1/customer-vault`;
-  const VAULT_HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": `Bearer ${process.env.REACT_APP_SUPABASE_ANON_KEY}`,
-  };
-
-  const vaultCall = async (body) => {
-    const res = await fetch(VAULT_URL, {
-      method: "POST",
-      headers: VAULT_HEADERS,
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Vault error: ${res.status}`);
-    return res.json();
-  };
+  /* ── Customer DB functions — direct Supabase (encryption via Edge Function added later) ── */
 
   const loadCustomers = async () => {
     setCustLoading(true);
     try {
-      const { customers: data } = await vaultCall({ action: "list" });
+      const { data } = await supabase
+        .from("customers")
+        .select("*")
+        .order("visit_count", { ascending: false });
       if (data) setCustomers(data);
     } catch(e) { console.error(e); }
     setCustLoading(false);
@@ -618,36 +606,84 @@ export default function App() {
     if (clean.length < 7) return;
     setCustSearching(true);
     try {
-      const { customer } = await vaultCall({ action: "lookup", phone: clean });
-      setCustFound(customer || null);
+      const { data } = await supabase
+        .from("customers")
+        .select("*")
+        .eq("phone", clean)
+        .single();
+      setCustFound(data || null);
     } catch(e) { setCustFound(null); }
     setCustSearching(false);
   };
 
   const saveCustomer = async (cust) => {
     try {
-      const { customer } = await vaultCall({
-        action: "upsert",
-        id:        cust.id || undefined,
-        phone:     cust.phone,
-        name:      cust.name,
-        email:     cust.email,
-        allergies: cust.allergies,
-        favorites: cust.favorites || [],
-      });
-      if (customer) {
+      const phone = (cust.phone || "").replace(/\D/g, "");
+      let data, error;
+      if (cust.id) {
+        // Update existing
+        ({ data, error } = await supabase
+          .from("customers")
+          .update({
+            name:      cust.name      || "",
+            email:     cust.email     || "",
+            allergies: cust.allergies || "",
+            favorites: cust.favorites || [],
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", cust.id)
+          .select()
+          .single());
+      } else {
+        // Create new
+        ({ data, error } = await supabase
+          .from("customers")
+          .insert([{
+            phone,
+            name:      cust.name      || "",
+            email:     cust.email     || "",
+            allergies: cust.allergies || "",
+            favorites: cust.favorites || [],
+            visit_count: 0,
+            total_spend: 0,
+          }])
+          .select()
+          .single());
+      }
+      if (error) { console.error(error); return null; }
+      if (data) {
         setCustomers(prev => cust.id
-          ? prev.map(c => c.id === cust.id ? customer : c)
-          : [customer, ...prev]
+          ? prev.map(c => c.id === cust.id ? data : c)
+          : [data, ...prev]
         );
       }
-      return customer;
+      return data;
     } catch(e) { console.error(e); return null; }
   };
 
   const updateCustomerStats = async (customerId, orderTotal, orderItems) => {
     try {
-      await vaultCall({ action: "updateStats", id: customerId, orderTotal, orderItems });
+      const { data: cur } = await supabase
+        .from("customers")
+        .select("visit_count, total_spend, favorites")
+        .eq("id", customerId)
+        .single();
+      if (!cur) return;
+      const favMap = {};
+      (cur.favorites || []).forEach(f => favMap[f.name] = (favMap[f.name] || 0) + f.count);
+      (orderItems || []).forEach(i => {
+        const n = i.item?.name || "Unknown";
+        favMap[n] = (favMap[n] || 0) + (i.qty || 1);
+      });
+      const newFavs = Object.entries(favMap)
+        .sort((a, b) => b[1] - a[1]).slice(0, 5)
+        .map(([name, count]) => ({ name, count }));
+      await supabase.from("customers").update({
+        visit_count: (cur.visit_count || 0) + 1,
+        total_spend: Number(((cur.total_spend || 0) + orderTotal).toFixed(2)),
+        favorites:   newFavs,
+        last_visit:  new Date().toISOString(),
+      }).eq("id", customerId);
     } catch(e) { console.error(e); }
   };
 
@@ -1282,8 +1318,8 @@ export default function App() {
                   const saved=await saveCustomer(editCust);
                   if(saved){
                     toast$(`✅ ${saved.name||"Customer"} saved`);
-                    // If we came from checkout lookup, attach immediately
-                    if(showCustModal||!screen==="customers") attachCustomer(saved);
+                    // attach to order if came from checkout or lookup modal
+                    if(screen!=="customers") attachCustomer(saved);
                     setEditCust(null);
                   }
                 }}
