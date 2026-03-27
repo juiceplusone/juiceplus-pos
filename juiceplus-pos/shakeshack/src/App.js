@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { exportToGoDaddyCSV, exportToJSON, downloadFile, formatDate } from "./exportUtils";
 
 const supabase = createClient(
   "https://qykjkxqbwievidodsnmz.supabase.co",
@@ -546,6 +547,8 @@ export default function App() {
   const [printStatus,  setPrintStatus]  = useState(null); // null | "printing" | "ok" | "error"
   const [printerIp,    setPrinterIp]    = useState(PRINTER_CONFIG.ip);
   const [showSettings,   setShowSettings]   = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [paymentMethod,  setPaymentMethod]  = useState("cash"); // "cash" | "card"
   const [vp,             setVp]             = useState({w:window.innerWidth,h:window.innerHeight});
 
@@ -773,7 +776,52 @@ export default function App() {
     }
   };
 
+  const handleExport = async (format) => {
+    setIsExporting(true);
+    try {
+      // Convert MENU items to product format for export
+      const products = [];
+      Object.entries(MENU).forEach(([catKey, cat]) => {
+        cat.items.forEach(item => {
+          products.push({
+            sku: `JP-${item.id}`,
+            name: item.name,
+            price: item.price || cat.basePrice,
+            description: item.ing || '',
+            category: cat.label,
+            inventory: 999,
+          });
+        });
+      });
+
+      let content, filename, mimeType;
+
+      if (format === 'godaddy') {
+        content = exportToGoDaddyCSV(products);
+        filename = `juiceplus-catalog-godaddy-${formatDate()}.csv`;
+        mimeType = 'text/csv';
+      } else if (format === 'json') {
+        content = exportToJSON(products);
+        filename = `juiceplus-catalog-${formatDate()}.json`;
+        mimeType = 'application/json';
+      }
+
+      downloadFile(content, filename, mimeType);
+      
+      setTimeout(() => {
+        setShowExportModal(false);
+        setIsExporting(false);
+        toast$(`✅ Exported ${filename}`, "ok");
+      }, 500);
+    } catch (error) {
+      console.error('Export failed:', error);
+      toast$(`⚠️ Export failed: ${error.message}`, "warn");
+      setIsExporting(false);
+    }
+  };
+
   /* ── Derived ── */
+
   const today=todayStr();
   const todayTxns=transactions.filter(t=>(t.date_label||t.dateLabel)===today);
   const daily={
@@ -834,6 +882,11 @@ export default function App() {
           <button onClick={()=>setShowSettings(true)}
             style={{background:C.card,border:"none",borderRadius:9,padding:"6px 12px",color:C.muted,fontWeight:700,fontSize:12,cursor:"pointer"}}>
             ⚙️ Printer
+          </button>
+          {/* Export button */}
+          <button onClick={()=>setShowExportModal(true)}
+            style={{background:C.card,border:"none",borderRadius:9,padding:"6px 12px",color:C.accent,fontWeight:700,fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+            📥 Export
           </button>
           {["pos","history","reports","customers"].map(s=>(
             <NavBtn key={s} id={s} active={screen===s} onClick={()=>setScreen(s)}
@@ -1441,6 +1494,71 @@ export default function App() {
                 Save Settings
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ EXPORT MODAL ══ */}
+      {showExportModal&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.78)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,backdropFilter:"blur(5px)"}}
+          onClick={()=>setShowExportModal(false)}>
+          <div style={{background:C.card,borderRadius:20,padding:24,width:"94%",maxWidth:440,border:`2px solid ${C.accent}`,boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}
+            onClick={e=>e.stopPropagation()}>
+
+            {/* Header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontSize:20,fontWeight:900,color:C.text}}>📥 Export Catalog</div>
+              <button onClick={()=>setShowExportModal(false)}
+                style={{background:C.bg,border:"none",borderRadius:8,width:30,height:30,color:C.muted,cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
+            </div>
+
+            {/* Info */}
+            <div style={{fontSize:13,color:C.muted,marginBottom:16}}>
+              Export your menu items to:
+            </div>
+
+            {/* Export Options */}
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+              {/* GoDaddy CSV */}
+              <button
+                onClick={()=>handleExport('godaddy')}
+                disabled={isExporting}
+                style={{padding:16,textAlign:"left",border:`2px solid ${C.accent}`,borderRadius:12,background:C.bg,cursor:isExporting?"not-allowed":"pointer",opacity:isExporting?0.5:1,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:900,color:C.text,fontSize:14}}>GoDaddy CSV</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:4}}>Import to GoDaddy Payments</div>
+                </div>
+                <span style={{fontSize:18}}>📊</span>
+              </button>
+
+              {/* JSON */}
+              <button
+                onClick={()=>handleExport('json')}
+                disabled={isExporting}
+                style={{padding:16,textAlign:"left",border:`2px solid ${C.green}`,borderRadius:12,background:C.bg,cursor:isExporting?"not-allowed":"pointer",opacity:isExporting?0.5:1,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontWeight:900,color:C.text,fontSize:14}}>JSON Format</div>
+                  <div style={{fontSize:11,color:C.muted,marginTop:4}}>Backup or transfer</div>
+                </div>
+                <span style={{fontSize:18}}>💾</span>
+              </button>
+            </div>
+
+            {/* Footer */}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setShowExportModal(false)} disabled={isExporting}
+                style={{flex:1,background:C.bg,border:"none",borderRadius:11,padding:"12px",color:C.muted,fontWeight:700,fontSize:13,cursor:isExporting?"not-allowed":"pointer",opacity:isExporting?0.5:1}}>Cancel</button>
+            </div>
+
+            {/* Loading State */}
+            {isExporting&&(
+              <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.3)",borderRadius:20,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{fontSize:36,marginBottom:8,animation:"spin 1s linear infinite"}}>⏳</div>
+                  <div style={{color:C.text,fontWeight:700,fontSize:12}}>Exporting...</div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
